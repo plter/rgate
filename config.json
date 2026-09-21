@@ -1,0 +1,11 @@
+{
+  "port": 9001,
+  "webroot": "www",
+  "proxy": {
+    "/web": "http://web:8080/web"
+  },
+  "ssl": {
+    "cert": "certs/cert.pem",
+    "key": "certs/cert.key"
+  }
+}
