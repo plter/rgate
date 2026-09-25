@@ -3,7 +3,7 @@ use bytes::Bytes;
 use http::{header, Method, Response, StatusCode};
 use std::path::{Path, PathBuf};
 
-/// 处理静态文件请求。path 为 URL 路径（不含查询串）。
+/// Serve a static file request. path is the URL path (without the query string).
 pub async fn serve(webroot: &Path, path: &str, method: &Method) -> Response<ResBody> {
     if method != Method::GET && method != Method::HEAD {
         let mut res = error(StatusCode::METHOD_NOT_ALLOWED, "405 Method Not Allowed\n");
@@ -14,7 +14,7 @@ pub async fn serve(webroot: &Path, path: &str, method: &Method) -> Response<ResB
 
     let decoded = percent_decode(path);
 
-    // 防目录穿越：丢弃空段与 "."，拒绝 ".."
+    // Guard against directory traversal: drop empty segments and ".", reject ".."
     let segments: Vec<&str> = decoded
         .split('/')
         .filter(|s| !s.is_empty() && *s != ".")
@@ -27,7 +27,7 @@ pub async fn serve(webroot: &Path, path: &str, method: &Method) -> Response<ResB
     for seg in &segments {
         fs_path.push(seg);
     }
-    // 目录请求回落到 index.html
+    // Directory requests fall back to index.html
     if decoded.ends_with('/') || fs_path.is_dir() {
         fs_path.push("index.html");
     }
@@ -38,7 +38,7 @@ pub async fn serve(webroot: &Path, path: &str, method: &Method) -> Response<ResB
             return error(StatusCode::NOT_FOUND, "404 Not Found\n");
         }
         Err(e) => {
-            eprintln!("[static] 读取 {} 失败: {e}", fs_path.display());
+            eprintln!("[static] failed to read {}: {e}", fs_path.display());
             return error(StatusCode::INTERNAL_SERVER_ERROR, "500 Internal Server Error\n");
         }
     };
@@ -56,7 +56,7 @@ pub async fn serve(webroot: &Path, path: &str, method: &Method) -> Response<ResB
     res
 }
 
-/// 按扩展名猜测 MIME 类型
+/// Guess the MIME type from the file extension
 fn mime_type(path: &Path) -> header::HeaderValue {
     let ext = path
         .extension()
@@ -87,7 +87,7 @@ fn mime_type(path: &Path) -> header::HeaderValue {
     header::HeaderValue::from_static(mime)
 }
 
-/// URL 路径的百分号解码
+/// Percent-decode a URL path
 fn percent_decode(s: &str) -> String {
     fn hex(b: u8) -> Option<u8> {
         match b {
