@@ -7,21 +7,27 @@ use std::path::PathBuf;
 ///
 /// ```json
 /// {
-///   "port": 9001,
+///   "httpPort": 9001,
+///   "httpsPort": 9002,
 ///   "webroot": "www",
 ///   "proxy": { "/web": "http://web:8080/web" },
 ///   "ssl": { "cert": "certs/cert.pem", "key": "certs/cert.key" }
 /// }
 /// ```
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
-    pub port: u16,
+    /// Port the plain-HTTP server listens on
+    pub http_port: u16,
+    /// When set, an HTTPS server listens on this port and all plain-HTTP
+    /// requests are redirected to it; when absent, HTTPS stays disabled.
+    pub https_port: Option<u16>,
     #[serde(default = "default_webroot")]
     pub webroot: PathBuf,
     /// Path prefix -> upstream address. Requests matching a prefix are reverse-proxied.
     #[serde(default)]
     pub proxy: HashMap<String, String>,
-    /// When set, HTTPS is enabled (listening on port); otherwise plain HTTP is used.
+    /// Certificate and private key for the HTTPS server (required when httpsPort is set).
     pub ssl: Option<SslConfig>,
 }
 

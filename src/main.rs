@@ -3,9 +3,9 @@ mod proxy;
 mod respond;
 mod static_files;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use config::{Config, SslConfig};
-use http::{Request, Response};
+use http::{header, Request, Response, StatusCode};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
-use crate::respond::ResBody;
+use crate::respond::{error, text, ResBody};
 use crate::static_files::serve as serve_static;
 
 /// Globally shared state
@@ -25,6 +25,8 @@ pub struct State {
     webroot: std::path::PathBuf,
     rules: Vec<ProxyRule>,
     connector: tokio_rustls::TlsConnector,
+    /// HTTPS port; when set, all plain-HTTP requests are redirected to it
+    https_port: Option<u16>,
 }
 
 impl State {
@@ -39,6 +41,7 @@ impl State {
             webroot: cfg.webroot.clone(),
             rules,
             connector: proxy::build_connector(),
+            https_port: cfg.https_port,
         })
     }
 
@@ -47,13 +50,21 @@ impl State {
     }
 }
 
-/// Main entry for each request: forward if a proxy rule matches, otherwise fall back to static files
+/// Main entry for each request: when HTTPS is enabled, plain-HTTP requests are
+/// redirected to it; otherwise, forward if a proxy rule matches, or fall back
+/// to static files
 async fn handle_request(
     state: Arc<State>,
     peer: SocketAddr,
     proto: &'static str,
     req: Request<Incoming>,
 ) -> Result<Response<ResBody>, std::convert::Infallible> {
+    if proto == "http" {
+        if let Some(port) = state.https_port {
+            return Ok(redirect_to_https(&req, port));
+        }
+    }
+
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -68,6 +79,33 @@ async fn handle_request(
 
     println!("{proto} {peer} {} {path} -> {}", method, res.status());
     Ok(res)
+}
+
+/// Build a 301 redirect that moves a plain-HTTP request to the HTTPS listener
+fn redirect_to_https(req: &Request<Incoming>, https_port: u16) -> Response<ResBody> {
+    // Host without any port; bracketed IPv6 literals are kept intact
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| {
+            if let Some(rest) = h.strip_prefix('[') {
+                rest.split(']').next().map(|ip| format!("[{ip}]")).unwrap_or_else(|| h.to_string())
+            } else {
+                h.split(':').next().unwrap_or(h).to_string()
+            }
+        });
+    let Some(host) = host else {
+        return error(StatusCode::BAD_REQUEST, "400 Bad Request\n");
+    };
+    let pq = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let port_suffix = if https_port == 443 { String::new() } else { format!(":{https_port}") };
+    let location = format!("https://{host}{port_suffix}{pq}");
+    let mut res = text(StatusCode::MOVED_PERMANENTLY, "301 Moved Permanently\n");
+    if let Ok(v) = header::HeaderValue::from_str(&location) {
+        res.headers_mut().insert(header::LOCATION, v);
+    }
+    res
 }
 
 /// Serve HTTP/1.1 over an established connection (plaintext or TLS), with WebSocket upgrade support
@@ -120,7 +158,7 @@ async fn load_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'stati
     file.read_to_end(&mut buf).await?;
     let mut cursor = std::io::Cursor::new(&buf);
     rustls_pemfile::private_key(&mut cursor)?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in key file {path:?}"))
+        .ok_or_else(|| anyhow!("no private key found in key file {path:?}"))
 }
 
 #[tokio::main]
@@ -129,33 +167,80 @@ async fn main() -> Result<()> {
     let cfg = Config::load(&config_path)?;
     let state = Arc::new(State::from_config(&cfg)?);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
-    let listener = TcpListener::bind(addr).await.with_context(|| format!("failed to listen on {addr}"))?;
+    let http_addr = SocketAddr::from(([0, 0, 0, 0], cfg.http_port));
+    let http_listener = TcpListener::bind(http_addr)
+        .await
+        .with_context(|| format!("failed to listen on {http_addr}"))?;
 
-    let acceptor = match &cfg.ssl {
-        Some(ssl) => Some(build_acceptor(ssl).await?),
-        None => None,
+    let https_addr = cfg.https_port.map(|port| SocketAddr::from(([0, 0, 0, 0], port)));
+    let (https_listener, acceptor) = match (https_addr, &cfg.ssl) {
+        (Some(addr), Some(ssl)) => {
+            let listener = TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("failed to listen on {addr}"))?;
+            (Some(listener), Some(build_acceptor(ssl).await?))
+        }
+        (Some(_), None) => {
+            return Err(anyhow!("httpsPort is configured but the ssl section is missing"))
+        }
+        (None, _) => {
+            if cfg.ssl.is_some() {
+                eprintln!("note: ssl config present but httpsPort is not; HTTPS is disabled");
+            }
+            (None, None)
+        }
     };
-    let proto: &'static str = if acceptor.is_some() { "https" } else { "http" };
 
-    println!("rgate started, listening on {proto}://{addr}");
+    println!("rgate started");
+    println!("  http listening on http://{http_addr}");
+    if let Some(addr) = https_addr {
+        println!("  https listening on https://{addr}");
+        println!("  plain-http requests are redirected to https");
+    }
     println!("  static file root: {}", state.webroot.display());
     for rule in &state.rules {
         println!("  proxy rule: {} -> {}", rule.key, rule.target);
     }
 
-    loop {
-        let (stream, peer) = listener.accept().await?;
-        let state = state.clone();
-        let acceptor = acceptor.clone();
+    // Plain-HTTP accept loop
+    let http_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            match http_listener.accept().await {
+                Ok((stream, peer)) => {
+                    let state = http_state.clone();
+                    tokio::spawn(async move {
+                        serve_conn(state, peer, "http", TokioIo::new(stream)).await
+                    });
+                }
+                Err(e) => eprintln!("[http] accept failed: {e}"),
+            }
+        }
+    });
+
+    // HTTPS accept loop
+    if let (Some(listener), Some(acceptor)) = (https_listener, acceptor) {
+        let https_state = state.clone();
         tokio::spawn(async move {
-            match acceptor {
-                Some(acc) => match acc.accept(stream).await {
-                    Ok(s) => serve_conn(state, peer, proto, TokioIo::new(s)).await,
-                    Err(e) => eprintln!("[tls] {peer} handshake failed: {e}"),
-                },
-                None => serve_conn(state, peer, proto, TokioIo::new(stream)).await,
+            loop {
+                match listener.accept().await {
+                    Ok((stream, peer)) => {
+                        let state = https_state.clone();
+                        let acceptor = acceptor.clone();
+                        tokio::spawn(async move {
+                            match acceptor.accept(stream).await {
+                                Ok(s) => serve_conn(state, peer, "https", TokioIo::new(s)).await,
+                                Err(e) => eprintln!("[tls] {peer} handshake failed: {e}"),
+                            }
+                        });
+                    }
+                    Err(e) => eprintln!("[https] accept failed: {e}"),
+                }
             }
         });
     }
+
+    // Keep the main task alive until interrupted
+    tokio::signal::ctrl_c().await?;
+    Ok(())
 }
