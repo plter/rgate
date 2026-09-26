@@ -12,7 +12,9 @@ use std::path::PathBuf;
 ///     <name value="test.yunp.top"/>
 ///     <ssl cert="certs/test.yunp.top.pem" key="certs/test.yunp.top.key"/>
 ///     <webroot value="www"/>
-///     <proxy path="/web" target="http://127.0.0.1:9081/web"/>
+///     <proxy path="/" target="http://127.0.0.1:8081/">
+///       <header name="Host" value="test.yunp.top"/>
+///     </proxy>
 ///   </host>
 ///   <host>
 ///     <name value="yunp.top"/>
@@ -41,8 +43,18 @@ pub struct HostConfig {
     /// Certificate and private key for this host (required on every host when https is enabled)
     pub ssl: Option<SslConfig>,
     pub webroot: PathBuf,
-    /// path prefix -> upstream address, in file order
-    pub proxy: Vec<(String, String)>,
+    /// Proxy rules, in file order
+    pub proxy: Vec<ProxyConfig>,
+}
+
+#[derive(Debug)]
+pub struct ProxyConfig {
+    /// Path prefix matched against the request path
+    pub path: String,
+    /// Upstream address
+    pub target: String,
+    /// Custom headers (name -> value) set on forwarded requests, in file order
+    pub headers: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -73,6 +85,8 @@ impl WebConfig {
         let mut hosts: Vec<HostConfig> = Vec::new();
         // Host currently being built (between <host> and </host>)
         let mut host: Option<HostConfig> = None;
+        // Proxy rule currently being built (between <proxy> and </proxy>)
+        let mut proxy: Option<ProxyConfig> = None;
 
         let mut buf = Vec::new();
         loop {
@@ -80,12 +94,25 @@ impl WebConfig {
                 Ok(Event::Start(e)) => (0, e),
                 Ok(Event::Empty(e)) => (1, e),
                 Ok(Event::End(e)) => {
-                    if e.name().as_ref() == "host" {
-                        if let Some(h) = host.take() {
-                            hosts.push(h);
-                        } else {
-                            bail!("unexpected </host>");
+                    match e.name().as_ref() {
+                        "host" => {
+                            if proxy.is_some() {
+                                bail!("unclosed <proxy> element before </host>");
+                            }
+                            if let Some(h) = host.take() {
+                                hosts.push(h);
+                            } else {
+                                bail!("unexpected </host>");
+                            }
                         }
+                        "proxy" => {
+                            let pc = proxy.take().ok_or_else(|| anyhow!("unexpected </proxy>"))?;
+                            host.as_mut()
+                                .ok_or_else(|| anyhow!("</proxy> outside of a <host> element"))?
+                                .proxy
+                                .push(pc);
+                        }
+                        _ => {}
                     }
                     buf.clear();
                     continue;
@@ -123,6 +150,36 @@ impl WebConfig {
                         proxy: Vec::new(),
                     });
                 }
+                "proxy" => {
+                    let path = attr(&e, "path")
+                        .ok_or_else(|| anyhow!("<proxy> is missing a path attribute"))?;
+                    let target = attr(&e, "target")
+                        .ok_or_else(|| anyhow!("<proxy> is missing a target attribute"))?;
+                    let pc = ProxyConfig { path, target, headers: Vec::new() };
+                    if kind == 0 {
+                        // container form: <proxy path=... target=...> <header .../> </proxy>
+                        if proxy.is_some() {
+                            bail!("nested <proxy> elements are not allowed");
+                        }
+                        proxy = Some(pc);
+                    } else {
+                        // self-closing form: <proxy path=... target=.../>
+                        host.as_mut()
+                            .ok_or_else(|| anyhow!("<proxy> outside of a <host> element"))?
+                            .proxy
+                            .push(pc);
+                    }
+                }
+                "header" => {
+                    let name = attr(&e, "name")
+                        .ok_or_else(|| anyhow!("<header> is missing a name attribute"))?;
+                    let value = attr(&e, "value")
+                        .ok_or_else(|| anyhow!("<header> is missing a value attribute"))?;
+                    proxy.as_mut()
+                        .ok_or_else(|| anyhow!("<header> outside of a <proxy> element"))?
+                        .headers
+                        .push((name, value));
+                }
                 "name" => {
                     let value = attr(&e, "value")
                         .ok_or_else(|| anyhow!("<name> is missing a value attribute"))?;
@@ -148,16 +205,6 @@ impl WebConfig {
                         .ok_or_else(|| anyhow!("<webroot> outside of a <host> element"))?
                         .webroot = value.into();
                 }
-                "proxy" => {
-                    let path = attr(&e, "path")
-                        .ok_or_else(|| anyhow!("<proxy> is missing a path attribute"))?;
-                    let target = attr(&e, "target")
-                        .ok_or_else(|| anyhow!("<proxy> is missing a target attribute"))?;
-                    host.as_mut()
-                        .ok_or_else(|| anyhow!("<proxy> outside of a <host> element"))?
-                        .proxy
-                        .push((path, target));
-                }
                 _ => {}
             }
             buf.clear();
@@ -165,6 +212,9 @@ impl WebConfig {
 
         if host.take().is_some() {
             bail!("unclosed <host> element");
+        }
+        if proxy.take().is_some() {
+            bail!("unclosed <proxy> element");
         }
         let http_port = http_port.ok_or_else(|| anyhow!("<ports> with a valid http attribute is required"))?;
         Ok(WebConfig { http_port, https_port, hosts })

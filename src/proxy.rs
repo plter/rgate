@@ -84,6 +84,9 @@ fn split_authority(authority: &str, scheme: Scheme) -> (String, u16) {
 pub struct ProxyRule {
     pub key: String,
     pub target: ProxyTarget,
+    /// Custom headers (name, value) set on forwarded requests; applied after
+    /// the built-in headers so they override Host / x-forwarded-* etc.
+    pub headers: Vec<(header::HeaderName, header::HeaderValue)>,
 }
 
 impl ProxyRule {
@@ -156,6 +159,10 @@ where
     headers.insert(header::HOST, header::HeaderValue::from_str(&target.authority)?);
     headers.insert("x-forwarded-for", header::HeaderValue::from_str(&peer.ip().to_string())?);
     headers.insert("x-forwarded-proto", header::HeaderValue::from_static(proto));
+    // Custom headers from config, applied last so they override the defaults
+    for (name, value) in &rule.headers {
+        headers.insert(name.clone(), value.clone());
+    }
 
     let mut upstream_req = Request::builder()
         .method(parts.method)

@@ -4,7 +4,9 @@
         <name value="test.yunp.top"/>
         <ssl cert="certs/test.yunp.top.pem" key="certs/test.yunp.top.key"/>
         <webroot value="www"/>
-        <proxy path="/web" target="http://127.0.0.1:9081/web"/>
+        <proxy path="/" target="http://127.0.0.1:8081/">
+            <header name="Host" value="test.yunp.top"/>
+        </proxy>
     </host>
     <host>
         <name value="yunp.top"/>

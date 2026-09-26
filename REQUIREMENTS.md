@@ -74,6 +74,28 @@ rgate 是一个单二进制的 HTTP/HTTPS 网关，功能包括：
 - 不同 SNI 名称在握手中出示各自 host 的证书
 - R2 的 HTTP→HTTPS 重定向行为在多 host 下继续生效
 
+### 需求 R4：代理规则自定义请求头
+
+**需求内容**：为 `<proxy>` 规则增加自定义 header 配置项，转发请求时向上游设置（覆写）指定的请求头：
+
+```xml
+<proxy path="/" target="http://127.0.0.1:8081/">
+    <header name="Host" value="test.yunp.top"/>
+</proxy>
+```
+
+**功能要求**：
+- `<proxy>` 同时支持两种写法：自闭合 `<proxy path=... target=.../>`（无自定义头）与容器式 `<proxy ...> <header .../> </proxy>`
+- 每条规则可配置多个 `<header name value>`，按文件顺序生效
+- 自定义头在转发时**最后应用**，因此可覆写内置头（`Host`、`x-forwarded-for`、`x-forwarded-proto` 等）
+- header 名称与值在加载时解析校验，非法值导致启动报错
+- 未配置 `<header>` 的规则行为与之前完全一致
+
+**验收标准**：
+- 配置 `<header name="Host" value="..."/>` 后，上游收到的 `Host` 头为配置值（而非上游 authority）
+- 自闭合形式的 `<proxy>` 规则不受影响
+- 非法 header 名称/值在启动时报错并指出所属规则
+
 ## 3. 既有基础功能（需求演进过程中保持不变）
 
 以下功能在历次重构中均要求保持：
@@ -85,7 +107,7 @@ rgate 是一个单二进制的 HTTP/HTTPS 网关，功能包括：
 | 前缀代理 | `/web` 命中 `/web` 与 `/web/**`，不命中 `/webfoo`；最长前缀优先 |
 | 上游目标 | 支持 `http://` 与 `https://`（上游 TLS 含内置根证书）；上游路径前缀拼接 |
 | WebSocket | 透传 `Connection`/`Upgrade` 头，101 响应后双向转发字节流 |
-| 转发头处理 | 剥离逐跳头；注入 `x-forwarded-for`、`x-forwarded-proto`；Host 改写为上游 authority |
+| 转发头处理 | 剥离逐跳头；注入 `x-forwarded-for`、`x-forwarded-proto`；Host 改写为上游 authority；按规则配置覆写自定义头（R4） |
 | 错误处理 | 上游不可达等错误返回 502；文件不存在 404；方法不允许 405 |
 
 ## 4. 非功能需求

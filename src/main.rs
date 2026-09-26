@@ -12,6 +12,7 @@ use hyper_util::rt::TokioIo;
 use proxy::{bad_gateway, ProxyRule, ProxyTarget};
 use std::net::SocketAddr;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
@@ -42,8 +43,21 @@ impl State {
         let mut hosts = Vec::new();
         for host in &cfg.hosts {
             let mut rules = Vec::new();
-            for (path, target) in &host.proxy {
-                rules.push(ProxyRule { key: path.clone(), target: ProxyTarget::parse(target)? });
+            for pc in &host.proxy {
+                // Parse and validate custom headers up front
+                let mut headers = Vec::new();
+                for (name, value) in &pc.headers {
+                    let n = http::header::HeaderName::from_str(name)
+                        .with_context(|| format!("invalid header name {name:?} in proxy rule {}", pc.path))?;
+                    let v = http::header::HeaderValue::from_str(value)
+                        .with_context(|| format!("invalid header value {value:?} in proxy rule {}", pc.path))?;
+                    headers.push((n, v));
+                }
+                rules.push(ProxyRule {
+                    key: pc.path.clone(),
+                    target: ProxyTarget::parse(&pc.target)?,
+                    headers,
+                });
             }
             // Longest prefix matches first
             rules.sort_by(|a, b| b.key.len().cmp(&a.key.len()));
