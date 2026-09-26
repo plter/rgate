@@ -1,0 +1,16 @@
+<web>
+    <ports http="80" https="443"/>
+    <host>
+        <name value="test.yunp.top"/>
+        <ssl cert="certs/test.yunp.top.pem" key="certs/test.yunp.top.key"/>
+        <webroot value="www"/>
+        <proxy path="/web" target="http://127.0.0.1:9081/web"/>
+    </host>
+    <host>
+        <name value="yunp.top"/>
+        <name value="www.yunp.top"/>
+        <ssl cert="certs/yunp.top.pem" key="certs/yunp.top.key"/>
+        <webroot value="www"/>
+        <proxy path="/web" target="http://127.0.0.1:9082/web"/>
+    </host>
+</web>
